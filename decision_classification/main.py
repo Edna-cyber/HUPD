@@ -518,18 +518,30 @@ if __name__ == '__main__':
         args.batch_size = 1
 
     # Load the dataset dictionary
-    dataset_dict = load_dataset(args.dataset_load_path , 
-        cache_dir=args.cache_dir,
-        data_dir=args.data_dir,
-        ipc_label=args.ipc_label,
-        cpc_label= args.cpc_label,
-        train_filing_start_date=args.train_filing_start_date, 
-        train_filing_end_date=args.train_filing_end_date,
-        val_filing_start_date=args.val_filing_start_date, 
-        val_filing_end_date=args.val_filing_end_date,
-        val_set_balancer = args.val_set_balancer,
-        uniform_split = args.uniform_split,
+    dataset_dict = load_dataset('HUPD/hupd',
+        name='all',
+        cache_dir = "/usr/project/xtmp/rz95/.cache/huggingface",
+        data_files="https://huggingface.co/datasets/HUPD/hupd/blob/main/hupd_metadata_2022-02-22.feather", 
+        icpr_label=None,
+        force_extract=True,
+        train_filing_start_date='2015-01-01',
+        train_filing_end_date='2016-12-31',
+        val_filing_start_date='2017-01-01',
+        val_filing_end_date='2017-12-31',
         )
+    
+    # dataset_dict = load_dataset(args.dataset_load_path , 
+    #     cache_dir=args.cache_dir,
+    #     data_dir=args.data_dir,
+    #     ipc_label=args.ipc_label,
+    #     cpc_label= args.cpc_label,
+    #     train_filing_start_date=args.train_filing_start_date, 
+    #     train_filing_end_date=args.train_filing_end_date,
+    #     val_filing_start_date=args.val_filing_start_date, 
+    #     val_filing_end_date=args.val_filing_end_date,
+    #     val_set_balancer = args.val_set_balancer,
+    #     uniform_split = args.uniform_split,
+    #     )
 
     for name in ['train', 'validation']:
         dataset_dict[name] = dataset_dict[name].map(map_decision_to_string)
