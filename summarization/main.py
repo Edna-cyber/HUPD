@@ -324,14 +324,26 @@ def main():
 
     # Load dataset
     assert data_args.dataset_name in ['patents', 'patents_conditional']
-    datasets = load_dataset(
-        'greeneggsandyaml/test-dataset-debug', 
-        name=("sample" if data_args.use_sample_data else "all"),
-        ipcr_label=data_args.ipcr_label,
-        train_filing_start_date=data_args.train_filing_start_date,
-        train_filing_end_date=data_args.train_filing_end_date,
-        val_filing_start_date=data_args.val_filing_start_date,
-        val_filing_end_date=data_args.val_filing_end_date,
+    # datasets = load_dataset(
+    #     'greeneggsandyaml/test-dataset-debug', 
+    #     name=("sample" if data_args.use_sample_data else "all"),
+    #     ipcr_label=data_args.ipcr_label,
+    #     train_filing_start_date=data_args.train_filing_start_date,
+    #     train_filing_end_date=data_args.train_filing_end_date,
+    #     val_filing_start_date=data_args.val_filing_start_date,
+    #     val_filing_end_date=data_args.val_filing_end_date,
+    # )
+    
+    datasets = load_dataset('HUPD/hupd',
+        name='all',
+        cache_dir = "/usr/project/xtmp/rz95/.cache/huggingface",
+        data_files="https://huggingface.co/datasets/HUPD/hupd/blob/main/hupd_metadata_2022-02-22.feather", 
+        icpr_label=None,
+        force_extract=True,
+        train_filing_start_date='2015-01-01',
+        train_filing_end_date='2016-12-31',
+        val_filing_start_date='2017-01-01',
+        val_filing_end_date='2017-12-31',
     )
 
     # Preprocess dataset

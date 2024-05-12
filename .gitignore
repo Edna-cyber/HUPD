@@ -134,3 +134,4 @@ decision_classification/logistic_regression_train2015to17.txt
 decision_classification/models/
 decision_classification/temp_tokenizer.json
 decision_classification/test.txt
+summarization/outputs/
