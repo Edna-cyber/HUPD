@@ -129,9 +129,7 @@ dmypy.json
 .pyre/
 
 # Output files
-decision_classification/dbert_train_G06F_2015to17.txt
-decision_classification/logistic_regression_train2015to17.txt
 decision_classification/models/
 decision_classification/temp_tokenizer.json
-decision_classification/test.txt
+decision_classification/*.txt
 summarization/outputs/
