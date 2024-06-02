@@ -16,7 +16,7 @@ except ImportError:
 
 # PyTorch
 import torch
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 
 # Hugging Face datasets
 from datasets import load_dataset
@@ -196,7 +196,7 @@ def map_decision_to_string(example):
     return {'output': [example['decision']]}
 
 # Create dataset
-def create_dataset(args, dataset_dict, tokenizer, section='abstract', use_wsampler=True):
+def create_dataset(args, dataset_dict, tokenizer, section='abstract'):
     data_loaders = []
     for name in ['train', 'validation']:
         # Skip the training set if we are doing only inference
@@ -216,22 +216,7 @@ def create_dataset(args, dataset_dict, tokenizer, section='abstract', use_wsampl
             dataset.set_format(type='torch', 
                 columns=['input_ids', 'attention_mask', 'output'])
 
-            # Check if we are using a weighted sampler for the training set
-            if use_wsampler and name == 'train':
-                # https://discuss.pytorch.org/t/balanced-sampling-between-classes-with-torchvision-dataloader/2703/10
-                target = dataset['output']
-                class_sample_count = torch.tensor([(target == t).sum() for t in torch.unique(target, sorted=True)])
-                weight = 1. / class_sample_count.float()
-                samples_weight = torch.tensor([weight[t] for t in target])
-                sampler = WeightedRandomSampler(weights=samples_weight, num_samples=len(samples_weight), replacement=True)
-                data_loaders.append(DataLoader(dataset, batch_size=args.batch_size, sampler=sampler))
-                print(f'*** Set: {name} (using a weighted sampler).')
-                print(f'*** Weights: {weight}')
-                if write_file:
-                    write_file.write(f'*** Set: {name} (using a weighted sampler).\n')
-                    write_file.write(f'*** Weights: {weight}\n')
-            else:
-                data_loaders.append(DataLoader(dataset, batch_size=args.batch_size, shuffle=(name=='train')))
+            data_loaders.append(DataLoader(dataset, batch_size=args.batch_size, shuffle=(name=='train')))
     return data_loaders
 
 
@@ -459,7 +444,6 @@ if __name__ == '__main__':
     parser.add_argument('--vocab_size', type=int, default=10000, help='Vocabulary size (of the tokenizer).')
     parser.add_argument('--min_frequency', type=int, default=3, help='The minimum frequency that a token/word needs to have in order to appear in the vocabulary.')
     parser.add_argument('--max_length', type=int, default=512, help='The maximum total input sequence length after tokenization. Sequences longer than this number will be trunacated.')
-    parser.add_argument('--use_wsampler', action='store_true', help='Use a weighted sampler (for the training set).')
     parser.add_argument('--val_set_balancer', action='store_true', help='Use a balanced set for validation? That is, do you want the same number of classes of examples in the validation set.')
     parser.add_argument('--uniform_split', action='store_true', help='Uniformly split the data into training and validation sets.')
     
@@ -600,8 +584,7 @@ if __name__ == '__main__':
         args = args, 
         dataset_dict = dataset_dict, 
         tokenizer = tokenizer, 
-        section = args.section,
-        use_wsampler=args.use_wsampler
+        section = args.section
         )
     del dataset_dict
 
