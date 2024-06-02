@@ -189,11 +189,8 @@ decision_to_str = {
 }
 
 # Map decision2string
-# def map_decision_to_string(example):
-#     return {'output': decision_to_str[example['decision']]}
-
 def map_decision_to_string(example):
-    return {'output': [example['decision']]}
+    return {'output': decision_to_str[example['decision']]}
 
 # Create dataset
 def create_dataset(args, dataset_dict, tokenizer, section='abstract'):
@@ -204,18 +201,14 @@ def create_dataset(args, dataset_dict, tokenizer, section='abstract'):
             data_loaders.append(None)
         else:
             dataset = dataset_dict[name]
-            
             print('*** Tokenizing...')
-
             # Tokenize the input
             dataset = dataset.map(
                 lambda e: tokenizer(e[section], truncation=True, padding='max_length'),
                 batched=True)
-
             # Set the dataset format
             dataset.set_format(type='torch', 
                 columns=['input_ids', 'attention_mask', 'output'])
-
             data_loaders.append(DataLoader(dataset, batch_size=args.batch_size, shuffle=(name=='train')))
     return data_loaders
 
@@ -508,27 +501,12 @@ if __name__ == '__main__':
         args.batch_size = 1
 
     # Load the dataset dictionary
-    # dataset_dict = load_dataset('HUPD/hupd',
-    #     name='all',
-    #     cache_dir = "/usr/project/xtmp/rz95/.cache/huggingface",
-    #     data_files="https://huggingface.co/datasets/HUPD/hupd/blob/main/hupd_metadata_2022-02-22.feather", 
-    #     icpr_label=None,
-    #     force_extract=True,
-    #     train_filing_start_date='2015-01-01', 
-    #     train_filing_end_date='2016-12-31', 
-    #     val_filing_start_date='2017-01-01',
-    #     val_filing_end_date='2017-12-31',
-    #     )
-    
     corpus_dir = "/usr/project/xtmp/rz95/InterpretableQA-LLMTools/data/external_corpus"
     train_df = []
     train_df.append(pd.read_csv(os.path.join(corpus_dir, "hupd", "hupd_2015.csv")))
     train_df.append(pd.read_csv(os.path.join(corpus_dir, "hupd", "hupd_2016.csv")))
     train_df = pd.concat(train_df, ignore_index=True)
     validation_df = pd.read_csv(os.path.join(corpus_dir, "hupd", "hupd_2017.csv"))
-    # print(train_df.columns)
-    # print(len(train_df))
-    # print(len(validation_df))
     train_dataset = Dataset.from_pandas(train_df)
     validation_dataset = Dataset.from_pandas(validation_df)
     dataset_dict = DatasetDict({"train": train_dataset, "validation": validation_dataset})
@@ -537,20 +515,6 @@ if __name__ == '__main__':
         dataset_dict[name] = dataset_dict[name].map(map_decision_to_string)
         # Remove the pending and CONT-patent applications
         dataset_dict[name] = dataset_dict[name].filter(lambda e: e['output'] <= 1)
-    
-    # # # original code load dataset method
-    # # dataset_dict = load_dataset(args.dataset_load_path , 
-    # #     cache_dir=args.cache_dir,
-    # #     data_dir=args.data_dir,
-    # #     ipc_label=args.ipc_label,
-    # #     cpc_label= args.cpc_label,
-    # #     train_filing_start_date=args.train_filing_start_date, 
-    # #     train_filing_end_date=args.train_filing_end_date,
-    # #     val_filing_start_date=args.val_filing_start_date, 
-    # #     val_filing_end_date=args.val_filing_end_date,
-    # #     val_set_balancer = args.val_set_balancer,
-    # #     uniform_split = args.uniform_split,
-    # #     )
     
     # Create a model and an appropriate tokenizer
     tokenizer, dataset_dict, model, vocab_size = create_model_and_tokenizer(
