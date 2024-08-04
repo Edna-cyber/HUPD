@@ -1,14 +1,17 @@
+import time
 import logging
 import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
 import pandas as pd
+from pathlib import Path
+from pprint import pprint
 
 import nltk  # Here to have a nice missing dependency error message early on
 import numpy as np
-from datasets import load_dataset, load_metric
-from datasets import Dataset, DatasetDict, concatenate_datasets
+from datasets import load_metric
+from datasets import Dataset, DatasetDict
 
 import transformers
 from filelock import FileLock
@@ -22,12 +25,9 @@ from transformers import (
     Seq2SeqTrainingArguments,
     set_seed,
 )
-from transformers.file_utils import is_offline_mode
+from transformers import AutoTokenizer
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
-
-from summarization_data import preprocess_dataset_for_summarization
-
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.5.0.dev0")
@@ -36,17 +36,111 @@ logger = logging.getLogger(__name__)
 nltk.data.path.append("/usr/project/xtmp/rz95/")
 
 try:
-    # nltk.data.find("/usr/project/xtmp/rz95/tokenizers/punkt")
     nltk.data.find("tokenizers/punkt")
     print("Found nltk")
 except (LookupError, OSError):
-    if is_offline_mode():
-        raise LookupError(
-            "Offline mode: run this script without TRANSFORMERS_OFFLINE first to download nltk data files"
-        )
     with FileLock(".lock") as lock:
         nltk.download("punkt", download_dir='/usr/project/xtmp/rz95/', quiet=True)
         print("Finished downloading punkt")
+        
+def _preprocess_dataset_for_summarization(dataset, sep_token):
+
+    # For filtering out continued patents from our dataset
+    decision_to_str = {
+        'REJECTED': 0,
+        'ACCEPTED': 1,
+        'PENDING': 2,
+        'CONT-REJECTED': 3,
+        'CONT-ACCEPTED': 4,
+        'CONT-PENDING': 5
+    }
+
+    # Indices of cont patents
+    indices_of_cont_patents = {v for k, v in decision_to_str.items() if k.startswith('CONT-')}
+
+    def map_decision_to_string(example):
+        # NOTE: returned dict updates the example
+        return {'decision': decision_to_str[example['decision']]}
+
+    # Performing the remapping means iterating over the dataset
+    print('Mapping decision to integer')
+    dataset = dataset.map(map_decision_to_string)
+
+    # NOTE: This stores the updated table in a cache file indexed
+    # by the current state and the mapping function (I believe)
+    print('Processed dataset cached to: ')
+    pprint(dataset.cache_files)
+
+    def filter_cont_patents(e):
+        return e['decision'] not in indices_of_cont_patents
+
+    def format_example_for_summarization(e):
+
+        # Check if claims starts with special text, and if so remove it
+        # assert isinstance(e['claims'], list), f'unexpected format for claims: {e["claims"]}'
+        if 'What is claimed is:' in e['claims'][:50]:
+            e['claims'] = e['claims'].replace('What is claimed is:', '')
+
+        # Format
+        # NOTE: The tokenizer will add `bos` and `eos` tokens automatically, so we do not add them here
+        text = 'TITLE {title} {sep} CLAIMS {claims}'.format(
+            sep=sep_token, title=e['title'], claims=e['claims']
+        )
+        return {
+            'claims_for_summarization': text,
+            'abstract_for_summarization': e['abstract']
+        }
+
+    # Filter out the CONT patents
+    print('Filtering out CONT patents')
+    print(f'[OLD] len(dataset) = {len(dataset)}')
+    dataset = dataset.filter(filter_cont_patents)
+    print(f'[NEW] len(dataset) = {len(dataset)}')
+
+    # Format examples
+    print('Formatting examples for summarization')
+    dataset = dataset.map(format_example_for_summarization, batched=False)
+    return dataset
+
+def preprocess_dataset_for_summarization(dataset_dict, tokenizer):
+    """ Loads dataset for language modeling. Note that the tokenizer is needed in order 
+        to add [CLS] and [BOS] tokens to the data. """
+
+    print('****************** Started loading dataset ******************')
+    start_time = time.time()
+
+    # Print some metadata
+    print('Dataset dictionary contents:')
+    pprint(dataset_dict)
+    print('Dataset dictionary cached to:')
+    pprint(dataset_dict.cache_files)
+    print(f'Train dataset initial size: {dataset_dict["train"].shape}')
+    print(f'Validation dataset initial size: {dataset_dict["validation"].shape}')
+
+    # Add new tokens to the tokenizer
+    print(f'Adding new tokens to tokenizer')
+    print(f'[OLD] len(tokenizer.vocab) = {len(tokenizer)}')
+    new_tokens = Path('ipc_labels.txt').read_text().splitlines(keepends=False)
+    new_tokens += ['TITLE', 'CLAIMS']
+    tokenizer.add_tokens(new_tokens)
+    if not bool(tokenizer.sep_token):  # we need to add a <sep> token
+        tokenizer.sep_token = '<sep>'
+    print(f'[NEW] len(tokenizer.vocab) = {len(tokenizer)}')
+
+    # Create training and validation datasets
+    print('>>> Training dataset')
+    dataset_dict["train"] = _preprocess_dataset_for_summarization(
+        dataset_dict["train"],
+        sep_token=tokenizer.special_tokens_map['sep_token']
+    )
+    print('>>> Validation dataset')
+    dataset_dict["validation"] = _preprocess_dataset_for_summarization(
+        dataset_dict["validation"], 
+        sep_token=tokenizer.special_tokens_map['sep_token']
+    )
+    
+    print(f'****************** Finished loading dataset in {time.time() - start_time:.1f} seconds ******************')
+    return dataset_dict, tokenizer
 
 @dataclass
 class ModelArguments:
@@ -62,9 +156,6 @@ class ModelArguments:
     )
     tokenizer_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"}
-    )
-    train_from_scratch: Optional[str] = field(
-        default=False, metadata={"help": "Train from scratch"}
     )
     cache_dir: Optional[str] = field(
         default=None,
@@ -92,10 +183,6 @@ class DataTrainingArguments:
     """
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
-
-    dataset_config_name: Optional[str] = field(
-        default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
-    )
     text_column: Optional[str] = field(
         default=None,
         metadata={"help": "The name of the column in the datasets containing the full texts (for summarization)."},
@@ -107,33 +194,6 @@ class DataTrainingArguments:
     overwrite_cache: bool = field(
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
     )
-    preprocessing_num_workers: Optional[int] = field(
-        default=None,
-        metadata={"help": "The number of processes to use for the preprocessing."},
-    )
-    max_source_length: Optional[int] = field(
-        default=1024,
-        metadata={
-            "help": "The maximum total input sequence length after tokenization. Sequences longer "
-            "than this will be truncated, sequences shorter will be padded."
-        },
-    )
-    max_target_length: Optional[int] = field(
-        default=128,
-        metadata={
-            "help": "The maximum total sequence length for target text after tokenization. Sequences longer "
-            "than this will be truncated, sequences shorter will be padded."
-        },
-    )
-    val_max_target_length: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "The maximum total sequence length for validation target text after tokenization. Sequences longer "
-            "than this will be truncated, sequences shorter will be padded. Will default to `max_target_length`."
-            "This argument is also used to override the ``max_length`` param of ``model.generate``, which is used "
-            "during ``evaluate`` and ``predict``."
-        },
-    )
     pad_to_max_length: bool = field(
         default=False,
         metadata={
@@ -142,78 +202,12 @@ class DataTrainingArguments:
             "efficient on GPU but very bad for TPU."
         },
     )
-    max_train_samples: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "For debugging purposes or quicker training, truncate the number of training examples to this "
-            "value if set."
-        },
-    )
-    max_val_samples: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "For debugging purposes or quicker training, truncate the number of validation examples to this "
-            "value if set."
-        },
-    )
-    max_test_samples: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "For debugging purposes or quicker training, truncate the number of test examples to this "
-            "value if set."
-        },
-    )
-    num_beams: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": "Number of beams to use for evaluation. This argument will be passed to ``model.generate``, "
-            "which is used during ``evaluate`` and ``predict``."
-        },
-    )
     ignore_pad_token_for_loss: bool = field(
         default=True,
         metadata={
             "help": "Whether to ignore the tokens corresponding to padded labels in the loss computation or not."
         },
     )
-    source_prefix: Optional[str] = field(
-        default=None, metadata={"help": "A prefix to add before every source text (useful for T5 models)."}
-    )
-
-    # Patent data arguments
-    ipcr_label: Optional[str] = field(
-        default=None,
-        metadata={"help": "IPCR label for filtering patents data"},
-    )
-    use_sample_data: bool = field(
-        default=True,
-        metadata={"help": "Use sample of patent data (useful for debugging)"},
-    )
-
-
-    # def __post_init__(self):
-    #     if self.dataset_name != 'patents':
-    #         raise ValueError("Dataset name should be `patents`.")
-    #     if self.val_max_target_length is None:
-    #         self.val_max_target_length = self.max_target_length
-
-
-summarization_name_mapping = {
-    "amazon_reviews_multi": ("review_body", "review_title"),
-    "big_patent": ("description", "abstract"),
-    "cnn_dailymail": ("article", "highlights"),
-    "orange_sum": ("text", "summary"),
-    "pn_summary": ("article", "summary"),
-    "psc": ("extract_text", "summary_text"),
-    "samsum": ("dialogue", "summary"),
-    "thaisum": ("body", "summary"),
-    "xglue": ("news_body", "news_title"),
-    "xsum": ("document", "summary"),
-    "wiki_summary": ("article", "highlights"),
-    "patents": ("claims_for_summarization", "abstract_for_summarization"),  # NEW!
-    "patents_like_bigpatent": ("description", "abstract_for_summarization"),  # NEW!
-}
-
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -228,19 +222,7 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     
-    print("cache dir", model_args.cache_dir)
-
-    if data_args.source_prefix is None and model_args.model_name_or_path in [
-        "t5-small",
-        "t5-base",
-        "t5-large",
-        "t5-3b",
-        "t5-11b",
-    ]:
-        logger.warning(
-            "You're running a t5 model but didn't provide a source prefix, which is the expected, e.g. with "
-            "`--source_prefix 'summarize: ' `"
-        )
+    # print("cache dir", model_args.cache_dir)
 
     # Detecting last checkpoint.
     last_checkpoint = None
@@ -296,43 +278,16 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    if model_args.train_from_scratch:
-        print('Creating model from scratch')
-        model = AutoModelForSeq2SeqLM.from_config(config)
-    else:
-        print('Loading model from pretrained checkpoint')
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
 
-    # Load dataset
-    # assert data_args.dataset_name in ['patents', 'patents_conditional']
-    # datasets = load_dataset(
-    #     'greeneggsandyaml/test-dataset-debug', 
-    #     name=("sample" if data_args.use_sample_data else "all"),
-    #     ipcr_label=data_args.ipcr_label,
-    #     train_filing_start_date=data_args.train_filing_start_date,
-    #     train_filing_end_date=data_args.train_filing_end_date,
-    #     val_filing_start_date=data_args.val_filing_start_date,
-    #     val_filing_end_date=data_args.val_filing_end_date,
-    # )
-    
-    # datasets = load_dataset('HUPD/hupd',
-    #     name='all',
-    #     cache_dir = "/usr/project/xtmp/rz95/.cache/huggingface",
-    #     data_files="https://huggingface.co/datasets/HUPD/hupd/blob/main/hupd_metadata_2022-02-22.feather", 
-    #     icpr_label=None,
-    #     force_extract=True,
-    #     train_filing_start_date='2015-01-01',
-    #     train_filing_end_date='2016-12-31',
-    #     val_filing_start_date='2017-01-01',
-    #     val_filing_end_date='2017-12-31',
-    # )
+    print('Loading model from pretrained checkpoint')
+    model = AutoModelForSeq2SeqLM.from_pretrained(
+        model_args.model_name_or_path,
+        from_tf=bool(".ckpt" in model_args.model_name_or_path),
+        config=config,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.model_revision,
+        use_auth_token=True if model_args.use_auth_token else None,
+    )
     
     train_df = []
     path = "/usr/project/xtmp/rz95/InterpretableQA-LLMTools"
@@ -360,7 +315,7 @@ def main():
     if model.config.decoder_start_token_id is None:
         raise ValueError("Make sure that `config.decoder_start_token_id` is correctly defined")
 
-    prefix = data_args.source_prefix if data_args.source_prefix is not None else ""
+    prefix = "summarize: "
 
     # Preprocessing the datasets.
     # We need to tokenize inputs and targets.
@@ -371,11 +326,10 @@ def main():
     elif training_args.do_predict:
         column_names = datasets["test"].column_names
     else:
-        logger.info("There is nothing to do. Please pass `do_train`, `do_eval` and/or `do_predict`.")
         return
 
     # Get the column names for input/target.
-    dataset_columns = summarization_name_mapping.get("patents", None)
+    dataset_columns = ("claims_for_summarization", "abstract_for_summarization")
     if data_args.text_column is None:
         text_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
     else:
@@ -394,20 +348,17 @@ def main():
             )
 
     # Temporarily set max_target_length for training.
-    max_target_length = data_args.max_target_length
+    max_target_length = 128
     padding = "max_length" if data_args.pad_to_max_length else False
-
-    if training_args.label_smoothing_factor > 0 and not hasattr(model, "prepare_decoder_input_ids_from_labels"):
-        logger.warn(
-            "label_smoothing is enabled but the `prepare_decoder_input_ids_from_labels` method is not defined for"
-            f"`{model.__class__.__name__}`. This will lead to loss being calculated twice and will take up more memory"
-        )
 
     def preprocess_function(examples):
         inputs = examples[text_column]
         targets = examples[summary_column]
+        print("text_column", text_column)
+        print(inputs[0])
+        print()
         inputs = [prefix + inp for inp in inputs]
-        model_inputs = tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
+        model_inputs = tokenizer(inputs, max_length=1024, padding=padding, truncation=True)
 
         # Setup the tokenizer for targets
         with tokenizer.as_target_tokenizer():
@@ -427,42 +378,26 @@ def main():
         train_dataset = datasets["train"]
         if "train" not in datasets:
             raise ValueError("--do_train requires a train dataset")
-        if data_args.max_train_samples is not None:
-            train_dataset = train_dataset.select(range(data_args.max_train_samples))
-        train_dataset = train_dataset.map(
-            preprocess_function,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            remove_columns=column_names,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
 
     if training_args.do_eval:
-        max_target_length = data_args.val_max_target_length
         if "validation" not in datasets:
             raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = datasets["validation"]
-        if data_args.max_val_samples is not None:
-            eval_dataset = eval_dataset.select(range(data_args.max_val_samples))
+        eval_dataset = eval_dataset.select(range(len(eval_dataset)))
         eval_dataset = eval_dataset.map(
             preprocess_function,
             batched=True,
-            num_proc=data_args.preprocessing_num_workers,
             remove_columns=column_names,
             load_from_cache_file=not data_args.overwrite_cache,
         )
 
     if training_args.do_predict:
-        max_target_length = data_args.val_max_target_length
         if "test" not in datasets:
             raise ValueError("--do_predict requires a test dataset")
         test_dataset = datasets["test"]
-        if data_args.max_test_samples is not None:
-            test_dataset = test_dataset.select(range(data_args.max_test_samples))
         test_dataset = test_dataset.map(
             preprocess_function,
             batched=True,
-            num_proc=data_args.preprocessing_num_workers,
             remove_columns=column_names,
             load_from_cache_file=not data_args.overwrite_cache,
         )
@@ -535,7 +470,7 @@ def main():
 
         metrics = train_result.metrics
         max_train_samples = (
-            data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
+            len(train_dataset)
         )
         metrics["train_samples"] = min(max_train_samples, len(train_dataset))
 
@@ -548,11 +483,8 @@ def main():
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
-        metrics = trainer.evaluate(
-            max_length=data_args.val_max_target_length, num_beams=data_args.num_beams, metric_key_prefix="eval"
-        )
-        max_val_samples = data_args.max_val_samples if data_args.max_val_samples is not None else len(eval_dataset)
-        metrics["eval_samples"] = min(max_val_samples, len(eval_dataset))
+        metrics = trainer.evaluate(metric_key_prefix="eval")
+        metrics["eval_samples"] = len(eval_dataset)
 
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
@@ -562,13 +494,10 @@ def main():
 
         test_results = trainer.predict(
             test_dataset,
-            metric_key_prefix="test",
-            max_length=data_args.val_max_target_length,
-            num_beams=data_args.num_beams,
+            metric_key_prefix="test"
         )
         metrics = test_results.metrics
-        max_test_samples = data_args.max_test_samples if data_args.max_test_samples is not None else len(test_dataset)
-        metrics["test_samples"] = min(max_test_samples, len(test_dataset))
+        metrics["test_samples"] = len(test_dataset)
 
         trainer.log_metrics("test", metrics)
         trainer.save_metrics("test", metrics)
@@ -580,6 +509,7 @@ def main():
                 )
                 test_preds = [pred.strip() for pred in test_preds]
                 output_test_preds_file = os.path.join(training_args.output_dir, "test_generations.txt")
+                print("yes?")
                 with open(output_test_preds_file, "w") as writer:
                     writer.write("\n".join(test_preds))
 
