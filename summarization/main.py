@@ -3,10 +3,12 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
+import pandas as pd
 
 import nltk  # Here to have a nice missing dependency error message early on
 import numpy as np
 from datasets import load_dataset, load_metric
+from datasets import Dataset, DatasetDict, concatenate_datasets
 
 import transformers
 from filelock import FileLock
@@ -31,17 +33,20 @@ from summarization_data import preprocess_dataset_for_summarization
 check_min_version("4.5.0.dev0")
 
 logger = logging.getLogger(__name__)
+nltk.data.path.append("/usr/project/xtmp/rz95/")
 
 try:
+    # nltk.data.find("/usr/project/xtmp/rz95/tokenizers/punkt")
     nltk.data.find("tokenizers/punkt")
+    print("Found nltk")
 except (LookupError, OSError):
     if is_offline_mode():
         raise LookupError(
             "Offline mode: run this script without TRANSFORMERS_OFFLINE first to download nltk data files"
         )
     with FileLock(".lock") as lock:
-        nltk.download("punkt", quiet=True)
-
+        nltk.download("punkt", download_dir='/usr/project/xtmp/rz95/', quiet=True)
+        print("Finished downloading punkt")
 
 @dataclass
 class ModelArguments:
@@ -88,9 +93,6 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    dataset_name: Optional[str] = field(
-        default='patents', metadata={"help": "The name of the dataset to use (via the datasets library)."}
-    )
     dataset_config_name: Optional[str] = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
     )
@@ -183,33 +185,17 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "IPCR label for filtering patents data"},
     )
-    train_filing_start_date: str = field(
-        default='2011-01-01',
-        metadata={"help": "Start date for filtering patents training data"},
-    )
-    train_filing_end_date: str = field(
-        default='2017-01-01',
-        metadata={"help": "End date for filtering patents training data"},
-    )
-    val_filing_start_date: str = field(
-        default='2017-01-01',
-        metadata={"help": "Start date for filtering patents validation data"},
-    )
-    val_filing_end_date: str = field(
-        default='2018-01-01',
-        metadata={"help": "End date for filtering patents validation data"},
-    )
     use_sample_data: bool = field(
         default=True,
         metadata={"help": "Use sample of patent data (useful for debugging)"},
     )
 
 
-    def __post_init__(self):
-        if self.dataset_name != 'patents':
-            raise ValueError("Dataset name should be `patents`.")
-        if self.val_max_target_length is None:
-            self.val_max_target_length = self.max_target_length
+    # def __post_init__(self):
+    #     if self.dataset_name != 'patents':
+    #         raise ValueError("Dataset name should be `patents`.")
+    #     if self.val_max_target_length is None:
+    #         self.val_max_target_length = self.max_target_length
 
 
 summarization_name_mapping = {
@@ -241,6 +227,8 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    
+    print("cache dir", model_args.cache_dir)
 
     if data_args.source_prefix is None and model_args.model_name_or_path in [
         "t5-small",
@@ -323,7 +311,7 @@ def main():
         )
 
     # Load dataset
-    assert data_args.dataset_name in ['patents', 'patents_conditional']
+    # assert data_args.dataset_name in ['patents', 'patents_conditional']
     # datasets = load_dataset(
     #     'greeneggsandyaml/test-dataset-debug', 
     #     name=("sample" if data_args.use_sample_data else "all"),
@@ -334,17 +322,29 @@ def main():
     #     val_filing_end_date=data_args.val_filing_end_date,
     # )
     
-    datasets = load_dataset('HUPD/hupd',
-        name='all',
-        cache_dir = "/usr/project/xtmp/rz95/.cache/huggingface",
-        data_files="https://huggingface.co/datasets/HUPD/hupd/blob/main/hupd_metadata_2022-02-22.feather", 
-        icpr_label=None,
-        force_extract=True,
-        train_filing_start_date='2015-01-01',
-        train_filing_end_date='2016-12-31',
-        val_filing_start_date='2017-01-01',
-        val_filing_end_date='2017-12-31',
-    )
+    # datasets = load_dataset('HUPD/hupd',
+    #     name='all',
+    #     cache_dir = "/usr/project/xtmp/rz95/.cache/huggingface",
+    #     data_files="https://huggingface.co/datasets/HUPD/hupd/blob/main/hupd_metadata_2022-02-22.feather", 
+    #     icpr_label=None,
+    #     force_extract=True,
+    #     train_filing_start_date='2015-01-01',
+    #     train_filing_end_date='2016-12-31',
+    #     val_filing_start_date='2017-01-01',
+    #     val_filing_end_date='2017-12-31',
+    # )
+    
+    train_df = []
+    path = "/usr/project/xtmp/rz95/InterpretableQA-LLMTools"
+    for sub in range(2004, 2006):
+        train_df.append(pd.read_csv("{}/data/external_corpus/hupd/hupd_{}.csv".format(path, sub)))
+    train_df = pd.concat(train_df, ignore_index=True)
+    val_df = pd.read_csv("{}/data/external_corpus/hupd/hupd_{}.csv".format(path, 2007))
+    test_df = pd.read_csv("{}/data/external_corpus/hupd/hupd_{}.csv".format(path, 2008))
+    train_dataset = Dataset.from_pandas(train_df)
+    val_dataset = Dataset.from_pandas(val_df)
+    test_dataset = Dataset.from_pandas(test_df)
+    datasets = DatasetDict({"train": train_dataset, "validation": val_dataset, "test": test_dataset})
 
     # Preprocess dataset
     datasets, tokenizer = preprocess_dataset_for_summarization(datasets, tokenizer)
@@ -375,7 +375,7 @@ def main():
         return
 
     # Get the column names for input/target.
-    dataset_columns = summarization_name_mapping.get(data_args.dataset_name, None)
+    dataset_columns = summarization_name_mapping.get("patents", None)
     if data_args.text_column is None:
         text_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
     else:
