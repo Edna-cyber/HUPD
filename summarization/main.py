@@ -25,7 +25,7 @@ from transformers import (
     set_seed,
 )
 from transformers import AutoTokenizer
-from transformers.trainer_utils import is_main_process
+from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -149,6 +149,10 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     
+    last_checkpoint = None
+    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+        last_checkpoint = get_last_checkpoint(training_args.output_dir)
+    
     cache_dir = "/usr/project/xtmp/rz95/.cache/huggingface/" #<YOUR_OWN_PATH>
 
     # Setup logging
@@ -233,8 +237,8 @@ def main():
     # We need to tokenize inputs and targets.
     if training_args.do_train:
         column_names = datasets["train"].column_names
-    # elif training_args.do_eval:
-    #     column_names = datasets["validation"].column_names
+    elif training_args.do_eval:
+        column_names = datasets["validation"].column_names
     elif training_args.do_predict:
         column_names = datasets["test"].column_names
     else:
@@ -288,17 +292,17 @@ def main():
         if "train" not in datasets:
             raise ValueError("--do_train requires a train dataset")
 
-    # if training_args.do_eval:
-    #     if "validation" not in datasets:
-    #         raise ValueError("--do_eval requires a validation dataset")
-    #     eval_dataset = datasets["validation"]
-    #     eval_dataset = eval_dataset.select(range(len(eval_dataset)))
-    #     eval_dataset = eval_dataset.map(
-    #         preprocess_function,
-    #         batched=True,
-    #         remove_columns=column_names,
-    #         load_from_cache_file=True,
-    #     )
+    if training_args.do_eval:
+        if "validation" not in datasets:
+            raise ValueError("--do_eval requires a validation dataset")
+        eval_dataset = datasets["validation"]
+        eval_dataset = eval_dataset.select(range(len(eval_dataset)))
+        eval_dataset = eval_dataset.map(
+            preprocess_function,
+            batched=True,
+            remove_columns=column_names,
+            load_from_cache_file=True,
+        )
 
     if training_args.do_predict:
         if "test" not in datasets:
@@ -358,7 +362,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=None, # if training_args.do_eval else NoneaZree,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
@@ -366,17 +370,21 @@ def main():
 
     # Training
     if training_args.do_train:
-        if os.path.isdir(model_args.model_name_or_path):
+        if last_checkpoint is not None:
+            checkpoint = last_checkpoint
+        elif os.path.isdir(model_args.model_name_or_path):
             checkpoint = model_args.model_name_or_path
         else:
             checkpoint = None
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
+
         metrics = train_result.metrics
         max_train_samples = (
             len(train_dataset)
         )
         metrics["train_samples"] = min(max_train_samples, len(train_dataset))
+
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
