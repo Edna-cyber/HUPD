@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 import pandas as pd
 from pathlib import Path
-from pprint import pprint
 
 import nltk  # Here to have a nice missing dependency error message early on
 import numpy as np
@@ -26,7 +25,7 @@ from transformers import (
     set_seed,
 )
 from transformers import AutoTokenizer
-from transformers.trainer_utils import get_last_checkpoint, is_main_process
+from transformers.trainer_utils import is_main_process
 from transformers.utils import check_min_version
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -59,25 +58,14 @@ def _preprocess_dataset_for_summarization(dataset, sep_token):
     indices_of_cont_patents = {v for k, v in decision_to_str.items() if k.startswith('CONT-')}
 
     def map_decision_to_string(example):
-        # NOTE: returned dict updates the example
         return {'decision': decision_to_str[example['decision']]}
 
-    # Performing the remapping means iterating over the dataset
-    print('Mapping decision to integer')
     dataset = dataset.map(map_decision_to_string)
-
-    # NOTE: This stores the updated table in a cache file indexed
-    # by the current state and the mapping function (I believe)
-    print('Processed dataset cached to: ')
-    pprint(dataset.cache_files)
 
     def filter_cont_patents(e):
         return e['decision'] not in indices_of_cont_patents
 
     def format_example_for_summarization(e):
-
-        # Check if claims starts with special text, and if so remove it
-        # assert isinstance(e['claims'], list), f'unexpected format for claims: {e["claims"]}'
         if 'What is claimed is:' in e['claims'][:50]:
             e['claims'] = e['claims'].replace('What is claimed is:', '')
 
@@ -91,14 +79,8 @@ def _preprocess_dataset_for_summarization(dataset, sep_token):
             'abstract_for_summarization': e['abstract']
         }
 
-    # Filter out the CONT patents
-    print('Filtering out CONT patents')
-    print(f'[OLD] len(dataset) = {len(dataset)}')
     dataset = dataset.filter(filter_cont_patents)
-    print(f'[NEW] len(dataset) = {len(dataset)}')
-
     # Format examples
-    print('Formatting examples for summarization')
     dataset = dataset.map(format_example_for_summarization, batched=False)
     return dataset
 
@@ -106,26 +88,13 @@ def preprocess_dataset_for_summarization(dataset_dict, tokenizer):
     """ Loads dataset for language modeling. Note that the tokenizer is needed in order 
         to add [CLS] and [BOS] tokens to the data. """
 
-    print('****************** Started loading dataset ******************')
     start_time = time.time()
-
-    # Print some metadata
-    print('Dataset dictionary contents:')
-    pprint(dataset_dict)
-    print('Dataset dictionary cached to:')
-    pprint(dataset_dict.cache_files)
-    print(f'Train dataset initial size: {dataset_dict["train"].shape}')
-    print(f'Validation dataset initial size: {dataset_dict["validation"].shape}')
-
     # Add new tokens to the tokenizer
-    print(f'Adding new tokens to tokenizer')
-    print(f'[OLD] len(tokenizer.vocab) = {len(tokenizer)}')
     new_tokens = Path('ipc_labels.txt').read_text().splitlines(keepends=False)
     new_tokens += ['TITLE', 'CLAIMS']
     tokenizer.add_tokens(new_tokens)
     if not bool(tokenizer.sep_token):  # we need to add a <sep> token
         tokenizer.sep_token = '<sep>'
-    print(f'[NEW] len(tokenizer.vocab) = {len(tokenizer)}')
 
     # Create training and validation datasets
     print('>>> Training dataset')
@@ -151,31 +120,6 @@ class ModelArguments:
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
-    config_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
-    )
-    tokenizer_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"}
-    )
-    cache_dir: Optional[str] = field(
-        default=None,
-        metadata={"help": "Where to store the pretrained models downloaded from huggingface.co"},
-    )
-    use_fast_tokenizer: bool = field(
-        default=True,
-        metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
-    )
-    model_revision: str = field(
-        default="main",
-        metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
-    )
-    use_auth_token: bool = field(
-        default=False,
-        metadata={
-            "help": "Will use the token generated when running `transformers-cli login` (necessary to use this script "
-            "with private models)."
-        },
-    )
 
 
 @dataclass
@@ -191,23 +135,6 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "The name of the column in the datasets containing the summaries (for summarization)."},
     )
-    overwrite_cache: bool = field(
-        default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
-    )
-    pad_to_max_length: bool = field(
-        default=False,
-        metadata={
-            "help": "Whether to pad all samples to model maximum sentence length. "
-            "If False, will pad the samples dynamically when batching to the maximum length in the batch. More "
-            "efficient on GPU but very bad for TPU."
-        },
-    )
-    ignore_pad_token_for_loss: bool = field(
-        default=True,
-        metadata={
-            "help": "Whether to ignore the tokens corresponding to padded labels in the loss computation or not."
-        },
-    )
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -222,22 +149,7 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     
-    # print("cache dir", model_args.cache_dir)
-
-    # Detecting last checkpoint.
-    last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif last_checkpoint is not None:
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
-            )
+    cache_dir = "/usr/project/xtmp/rz95/.cache/huggingface/" #<YOUR_OWN_PATH>
 
     # Setup logging
     logging.basicConfig(
@@ -266,17 +178,17 @@ def main():
     # The .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
     config = AutoConfig.from_pretrained(
-        model_args.config_name if model_args.config_name else model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
+        model_args.model_name_or_path,
+        cache_dir=cache_dir,
+        revision="main",
+        use_auth_token=None,
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_fast=model_args.use_fast_tokenizer,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
+        model_args.model_name_or_path,
+        cache_dir=cache_dir,
+        use_fast=True,
+        revision="main",
+        use_auth_token=None,
     )
 
     print('Loading model from pretrained checkpoint')
@@ -284,9 +196,9 @@ def main():
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
+        cache_dir=cache_dir,
+        revision="main",
+        use_auth_token=None,
     )
     
     train_df = []
@@ -321,8 +233,8 @@ def main():
     # We need to tokenize inputs and targets.
     if training_args.do_train:
         column_names = datasets["train"].column_names
-    elif training_args.do_eval:
-        column_names = datasets["validation"].column_names
+    # elif training_args.do_eval:
+    #     column_names = datasets["validation"].column_names
     elif training_args.do_predict:
         column_names = datasets["test"].column_names
     else:
@@ -348,15 +260,12 @@ def main():
             )
 
     # Temporarily set max_target_length for training.
-    max_target_length = 128
-    padding = "max_length" if data_args.pad_to_max_length else False
+    max_target_length = 128 #
+    padding = "max_length" #False
 
     def preprocess_function(examples):
         inputs = examples[text_column]
         targets = examples[summary_column]
-        print("text_column", text_column)
-        print(inputs[0])
-        print()
         inputs = [prefix + inp for inp in inputs]
         model_inputs = tokenizer(inputs, max_length=1024, padding=padding, truncation=True)
 
@@ -366,7 +275,7 @@ def main():
 
         # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
         # padding in the loss.
-        if padding == "max_length" and data_args.ignore_pad_token_for_loss:
+        if padding == "max_length":
             labels["input_ids"] = [
                 [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
             ]
@@ -379,17 +288,17 @@ def main():
         if "train" not in datasets:
             raise ValueError("--do_train requires a train dataset")
 
-    if training_args.do_eval:
-        if "validation" not in datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = datasets["validation"]
-        eval_dataset = eval_dataset.select(range(len(eval_dataset)))
-        eval_dataset = eval_dataset.map(
-            preprocess_function,
-            batched=True,
-            remove_columns=column_names,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
+    # if training_args.do_eval:
+    #     if "validation" not in datasets:
+    #         raise ValueError("--do_eval requires a validation dataset")
+    #     eval_dataset = datasets["validation"]
+    #     eval_dataset = eval_dataset.select(range(len(eval_dataset)))
+    #     eval_dataset = eval_dataset.map(
+    #         preprocess_function,
+    #         batched=True,
+    #         remove_columns=column_names,
+    #         load_from_cache_file=True,
+    #     )
 
     if training_args.do_predict:
         if "test" not in datasets:
@@ -399,11 +308,11 @@ def main():
             preprocess_function,
             batched=True,
             remove_columns=column_names,
-            load_from_cache_file=not data_args.overwrite_cache,
+            load_from_cache_file=True,
         )
 
     # Data collator
-    label_pad_token_id = -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
+    label_pad_token_id = -100 
     data_collator = DataCollatorForSeq2Seq(
         tokenizer,
         model=model,
@@ -411,7 +320,6 @@ def main():
         pad_to_multiple_of=8 if training_args.fp16 else None,
     )
 
-    # Metric
     metric = load_metric("rouge")
 
     def postprocess_text(preds, labels):
@@ -429,9 +337,8 @@ def main():
         if isinstance(preds, tuple):
             preds = preds[0]
         decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-        if data_args.ignore_pad_token_for_loss:
-            # Replace -100 in the labels as we can't decode them.
-            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        # Replace -100 in the labels as we can't decode them.
+        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
         # Some simple post-processing
@@ -451,7 +358,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
+        eval_dataset=None, # if training_args.do_eval else NoneaZree,
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
@@ -459,21 +366,17 @@ def main():
 
     # Training
     if training_args.do_train:
-        if last_checkpoint is not None:
-            checkpoint = last_checkpoint
-        elif os.path.isdir(model_args.model_name_or_path):
+        if os.path.isdir(model_args.model_name_or_path):
             checkpoint = model_args.model_name_or_path
         else:
             checkpoint = None
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
-
         metrics = train_result.metrics
         max_train_samples = (
             len(train_dataset)
         )
         metrics["train_samples"] = min(max_train_samples, len(train_dataset))
-
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
@@ -482,23 +385,19 @@ def main():
     results = {}
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
-
         metrics = trainer.evaluate(metric_key_prefix="eval")
         metrics["eval_samples"] = len(eval_dataset)
-
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
     if training_args.do_predict:
         logger.info("*** Test ***")
-
         test_results = trainer.predict(
             test_dataset,
             metric_key_prefix="test"
         )
         metrics = test_results.metrics
         metrics["test_samples"] = len(test_dataset)
-
         trainer.log_metrics("test", metrics)
         trainer.save_metrics("test", metrics)
 
@@ -509,7 +408,6 @@ def main():
                 )
                 test_preds = [pred.strip() for pred in test_preds]
                 output_test_preds_file = os.path.join(training_args.output_dir, "test_generations.txt")
-                print("yes?")
                 with open(output_test_preds_file, "w") as writer:
                     writer.write("\n".join(test_preds))
 
