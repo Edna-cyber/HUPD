@@ -224,9 +224,8 @@ def main():
     model.resize_token_embeddings(len(tokenizer))
     
     # Prediction
-    if training_args.do_predict:
-        print("Using validation dataset for prediction")
-        datasets["test"] = datasets["validation"]
+    # print("Using validation dataset for prediction")
+    datasets["test"] = datasets["validation"]
 
     if model.config.decoder_start_token_id is None:
         raise ValueError("Make sure that `config.decoder_start_token_id` is correctly defined")
@@ -283,17 +282,15 @@ def main():
     train_dataset = datasets["train"]
     if "train" not in datasets:
         raise ValueError("--do_train requires a train dataset")
-
-    if training_args.do_predict:
-        if "test" not in datasets:
-            raise ValueError("--do_predict requires a test dataset")
-        test_dataset = datasets["test"]
-        test_dataset = test_dataset.map(
-            preprocess_function,
-            batched=True,
-            remove_columns=column_names,
-            load_from_cache_file=True,
-        )
+    if "test" not in datasets:
+        raise ValueError("--do_predict requires a test dataset")
+    test_dataset = datasets["test"]
+    test_dataset = test_dataset.map(
+        preprocess_function,
+        batched=True,
+        remove_columns=column_names,
+        load_from_cache_file=True,
+    )
 
     # Data collator
     label_pad_token_id = -100 
@@ -345,7 +342,7 @@ def main():
         eval_dataset=None, #eval_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        compute_metrics=compute_metrics if training_args.predict_with_generate else None,
+        compute_metrics=compute_metrics,
     )
 
     # Training
@@ -370,27 +367,24 @@ def main():
 
     # Evaluation
     results = {}
+    logger.info("*** Test ***")
+    test_results = trainer.predict(
+        test_dataset,
+        metric_key_prefix="test"
+    )
+    metrics = test_results.metrics
+    metrics["test_samples"] = len(test_dataset)
+    trainer.log_metrics("test", metrics)
+    trainer.save_metrics("test", metrics)
 
-    if training_args.do_predict:
-        logger.info("*** Test ***")
-        test_results = trainer.predict(
-            test_dataset,
-            metric_key_prefix="test"
+    if trainer.is_world_process_zero():
+        test_preds = tokenizer.batch_decode(
+            test_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
         )
-        metrics = test_results.metrics
-        metrics["test_samples"] = len(test_dataset)
-        trainer.log_metrics("test", metrics)
-        trainer.save_metrics("test", metrics)
-
-        if trainer.is_world_process_zero():
-            if training_args.predict_with_generate:
-                test_preds = tokenizer.batch_decode(
-                    test_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
-                )
-                test_preds = [pred.strip() for pred in test_preds]
-                output_test_preds_file = os.path.join(training_args.output_dir, "test_generations.txt")
-                with open(output_test_preds_file, "w") as writer:
-                    writer.write("\n".join(test_preds))
+        test_preds = [pred.strip() for pred in test_preds]
+        output_test_preds_file = os.path.join(training_args.output_dir, "test_generations.txt")
+        with open(output_test_preds_file, "w") as writer:
+            writer.write("\n".join(test_preds))
 
     return results
 
