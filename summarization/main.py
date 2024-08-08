@@ -284,18 +284,6 @@ def main():
     if "train" not in datasets:
         raise ValueError("--do_train requires a train dataset")
 
-    
-    if "validation" not in datasets:
-        raise ValueError("--do_eval requires a validation dataset")
-    eval_dataset = datasets["validation"]
-    eval_dataset = eval_dataset.select(range(len(eval_dataset)))
-    eval_dataset = eval_dataset.map(
-        preprocess_function,
-        batched=True,
-        remove_columns=column_names,
-        load_from_cache_file=True,
-    )
-
     if training_args.do_predict:
         if "test" not in datasets:
             raise ValueError("--do_predict requires a test dataset")
@@ -354,7 +342,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        eval_dataset=None, #eval_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
@@ -382,11 +370,6 @@ def main():
 
     # Evaluation
     results = {}
-    logger.info("*** Evaluate ***")
-    metrics = trainer.evaluate(metric_key_prefix="eval")
-    metrics["eval_samples"] = len(eval_dataset)
-    trainer.log_metrics("eval", metrics)
-    trainer.save_metrics("eval", metrics)
 
     if training_args.do_predict:
         logger.info("*** Test ***")
